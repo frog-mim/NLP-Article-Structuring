@@ -86,8 +86,10 @@ python app/ml/dataset_builder.py --xml data/people_only.xml --out data/training.
 Output columns:
 
 ```text
-title,text,label
+title,text,label,infobox_fields
 ```
+
+`infobox_fields` is a JSON object extracted from the source Wikipedia infobox parameters. For example, an `Infobox person` row may include fields such as `birth_date`, `birth_place`, `occupation`, and `known_for`. These fields can be used as gold data for field extraction evaluation or for training a later information extraction model.
 
 ## Train the classifier
 

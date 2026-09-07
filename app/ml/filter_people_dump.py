@@ -9,13 +9,20 @@ import mwparserfromhell
 
 
 def extract_text_element(element: ET.Element, name: str, namespace: dict[str, str]) -> str:
-    namespaced = element.findtext(f"mw:{name}", default="", namespaces=namespace)
-    if namespaced:
-        return namespaced
+    if namespace:
+        namespaced = element.findtext(f"mw:{name}", default="", namespaces=namespace)
+        if namespaced:
+            return namespaced
     return element.findtext(name, default="")
 
 
 def iter_pages(xml_path: Path):
+    if not xml_path.exists():
+        raise FileNotFoundError(
+            f"Input XML dump not found: {xml_path}. "
+            "Download or place a Wikipedia pages-articles XML dump at this path first."
+        )
+
     context = ET.iterparse(xml_path, events=("start", "end"))
     _, root = next(context)
     namespace_uri = root.tag.split("}")[0].strip("{") if "}" in root.tag else ""

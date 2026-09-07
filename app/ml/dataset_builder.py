@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -21,6 +22,11 @@ def normalize_template_name(template_name: str) -> str:
 
 
 def detect_infobox_label(wikitext: str) -> str | None:
+    result = extract_infobox_template(wikitext)
+    return result[0] if result else None
+
+
+def extract_infobox_template(wikitext: str) -> tuple[str, mwparserfromhell.nodes.Template] | None:
     try:
         wikicode = mwparserfromhell.parse(wikitext)
     except Exception:
@@ -29,8 +35,55 @@ def detect_infobox_label(wikitext: str) -> str | None:
     for template in wikicode.filter_templates(recursive=True):
         label = normalize_template_name(str(template.name))
         if label:
-            return label
+            return label, template
     return None
+
+
+def normalize_parameter_name(parameter_name: str) -> str:
+    name = re.sub(r"<!--.*?-->", " ", parameter_name, flags=re.DOTALL)
+    name = re.sub(r"<[^>]+>", " ", name)
+    name = name.strip().replace(" ", "_")
+    name = re.sub(r"_+", "_", name)
+    return name.strip("_").lower()
+
+
+def clean_infobox_value(value: str) -> str:
+    value = re.sub(r"<ref\b[^>/]*>.*?</ref>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    value = re.sub(r"<ref\b[^/]*/\s*>", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"<br\s*/?>", " ", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\{\{\s*(?:birth date(?: and age)?|death date(?: and age)?)\s*\|\s*"
+        r"(\d{4})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})(?:\|[^{}]*)?\}\}",
+        r"\1-\2-\3",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    try:
+        cleaned = mwparserfromhell.parse(value).strip_code(normalize=True, collapse=True)
+    except Exception:
+        cleaned = re.sub(r"\[\[(?:[^|\]]+\|)?([^\]]+)\]\]", r"\1", value)
+        cleaned = re.sub(r"\{\{.*?\}\}", " ", cleaned, flags=re.DOTALL)
+
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def extract_infobox_fields(template: mwparserfromhell.nodes.Template) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for parameter in template.params:
+        raw_name = str(parameter.name)
+        field_name = normalize_parameter_name(raw_name)
+        if not field_name or field_name.isdigit():
+            continue
+
+        field_value = clean_infobox_value(str(parameter.value))
+        if not field_value:
+            continue
+
+        fields[field_name] = field_value
+    return fields
 
 
 def clean_wikitext(wikitext: str) -> str:
@@ -45,13 +98,21 @@ def clean_wikitext(wikitext: str) -> str:
 
 
 def extract_text_element(element: ET.Element, name: str, namespace: dict[str, str]) -> str:
-    namespaced = element.findtext(f"mw:{name}", default="", namespaces=namespace)
-    if namespaced:
-        return namespaced
+    if namespace:
+        namespaced = element.findtext(f"mw:{name}", default="", namespaces=namespace)
+        if namespaced:
+            return namespaced
     return element.findtext(name, default="")
 
 
 def iter_pages(xml_path: Path):
+    if not xml_path.exists():
+        raise FileNotFoundError(
+            f"Input XML not found: {xml_path}. "
+            "Provide a Wikipedia XML dump, or first create this file with "
+            "`python app/ml/filter_people_dump.py --xml data/enwiki.xml --out data/people_only.xml`."
+        )
+
     context = ET.iterparse(xml_path, events=("start", "end"))
     _, root = next(context)
     namespace_uri = root.tag.split("}")[0].strip("{") if "}" in root.tag else ""
@@ -71,7 +132,7 @@ def build_dataset(xml_path: Path, out_path: Path, limit: int | None = None) -> i
 
     with out_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["title", "text", "label"])
+        writer.writerow(["title", "text", "label", "infobox_fields"])
 
         for page, namespace in iter_pages(xml_path):
             title = extract_text_element(page, "title", namespace).strip()
@@ -82,15 +143,24 @@ def build_dataset(xml_path: Path, out_path: Path, limit: int | None = None) -> i
             if not title or not text or text.lstrip().upper().startswith("#REDIRECT"):
                 continue
 
-            label = detect_infobox_label(text)
-            if not label:
+            infobox = extract_infobox_template(text)
+            if not infobox:
                 continue
+            label, template = infobox
+            infobox_fields = extract_infobox_fields(template)
 
             cleaned_text = clean_wikitext(text)
             if not cleaned_text:
                 continue
 
-            writer.writerow([title, cleaned_text, label])
+            writer.writerow(
+                [
+                    title,
+                    cleaned_text,
+                    label,
+                    json.dumps(infobox_fields, ensure_ascii=False, sort_keys=True),
+                ]
+            )
             written += 1
             if limit is not None and written >= limit:
                 break
